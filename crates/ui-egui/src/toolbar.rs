@@ -9,6 +9,10 @@ use crate::theme::Tokens;
 use crate::{DesignApp, icons};
 
 const BTN: f32 = 24.0;
+/// Extra Tools-panel width for the tool names ("Show Names" / the Simple workspace).
+const LABEL_W: f32 = 112.0;
+/// The Simple workspace's tools: select, type, draw, place images, pick colours, move around.
+const SIMPLE_TOOLS: &[&str] = &["selection", "directSelection", "type", "line", "pen", "rectangleFrame", "rectangle", "eyedropper", "hand", "zoom"];
 
 pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
@@ -20,7 +24,10 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let viewport_h = ui.available_height() - frame.total_margin().sum().y;
     let crowded = !app.ui.tools_double_column && single_h.is_some_and(|h| h > viewport_h);
     let cols = if app.ui.tools_double_column || crowded { 2 } else { 1 };
-    let width = 8.0 + BTN * cols as f32 + 4.0 * (cols as f32 - 1.0) + 8.0;
+    // Tool names beside the icons need the single column's width.
+    let labels = app.ui.tool_labels && cols == 1;
+    let simple = app.ui.workspace == "Simple";
+    let width = 8.0 + BTN * cols as f32 + 4.0 * (cols as f32 - 1.0) + 8.0 + if labels { LABEL_W } else { 0.0 };
     let r = egui::Panel::left("tools").exact_size(width).resizable(false).frame(frame).show(ui, |ui| {
         crate::widgets::overflow_scrolling(ui);
         let scroll = egui::ScrollArea::vertical().id_salt("tools_scroll").auto_shrink([false, false]).show(ui, |ui| {
@@ -48,10 +55,19 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
             let mut row_items = Vec::new();
             for (gi, g) in TOOL_GROUPS.iter().enumerate() {
                 if g.is_empty() {
-                    row_items.push(None);
+                    // No separator at the top or twice in a row (Simple hides whole groups).
+                    if matches!(row_items.last(), Some(Some(_))) {
+                        row_items.push(None);
+                    }
+                    continue;
+                }
+                if simple && !g.iter().any(|tl| SIMPLE_TOOLS.contains(&tl.id) || tl.id == current) {
                     continue;
                 }
                 row_items.push(Some(gi));
+            }
+            if matches!(row_items.last(), Some(None)) {
+                row_items.pop();
             }
             let mut i = 0;
             while i < row_items.len() {
@@ -78,7 +94,29 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
                                     Some(s) => format!("{} ({s})", shown.label),
                                     None => shown.label.to_string(),
                                 };
-                                let resp = tool_button(ui, shown.icon, active, &tip);
+                                let mut resp = tool_button(ui, shown.icon, active, &tip);
+                                if labels {
+                                    // The name is part of the button: clicking it picks the tool too.
+                                    let name = shown.label.trim_end_matches(" Tool");
+                                    let (lr, lresp) = ui.allocate_exact_size(vec2(LABEL_W - 4.0, BTN), Sense::click());
+                                    if lresp.hovered() && !active {
+                                        ui.painter().rect_filled(lr, 2.0, t.hover);
+                                    }
+                                    ui.painter().text(
+                                        lr.left_center(),
+                                        egui::Align2::LEFT_CENTER,
+                                        crate::i18n::tr(&app.ui.language, name),
+                                        egui::FontId::proportional(12.0),
+                                        if active { t.text_strong } else { t.text },
+                                    );
+                                    if lresp.clicked() {
+                                        chosen = Some(shown.id);
+                                    }
+                                    if lresp.secondary_clicked() && g.len() > 1 {
+                                        app.ui.flyout = Some(gi);
+                                    }
+                                    resp = resp.union(lresp.on_hover_text(&tip));
+                                }
                                 if g.len() > 1 {
                                     // Flyout triangle.
                                     let r = resp.rect;

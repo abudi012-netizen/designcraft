@@ -210,8 +210,23 @@ fn services() -> Services {
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string()))),
         read: Some(Box::new(|p: &str| std::fs::read(p).map_err(|e| e.to_string()))),
         write: Some(Box::new(|p: &str, b: &[u8]| designcraft_engine::atomic::write_atomic(std::path::Path::new(p), b).map_err(|e| e.to_string()))),
+        fetch: Some(Box::new(fetch_text)),
         ..Default::default()
     }
+}
+
+/// GET `url` as text for reference lookups (Crossref, PubMed): 10 s timeout, 2 MB cap.
+fn fetch_text(url: &str) -> Result<String, String> {
+    use std::io::Read;
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build();
+    let resp = agent
+        .get(url)
+        .set("User-Agent", concat!("DesignCraft/", env!("CARGO_PKG_VERSION"), " (reference lookup)"))
+        .call()
+        .map_err(|e| e.to_string())?;
+    let mut body = String::new();
+    resp.into_reader().take(2 * 1024 * 1024).read_to_string(&mut body).map_err(|e| e.to_string())?;
+    Ok(body)
 }
 
 /// Desktop app ID: the Linux `.desktop` file name and hicolor icon name (Wayland matches windows by it).

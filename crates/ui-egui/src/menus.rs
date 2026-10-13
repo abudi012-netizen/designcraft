@@ -52,6 +52,14 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("app.placeWithOptions", "Place with Import Options…", Some("Cmd+Shift+D"), "{} — Word/RTF style mapping before placing"),
     ("app.exportText", "Export Text…", None, "{path?} — the story being edited, as Text Only (.txt) or Rich Text Format (.rtf)"),
     ("app.exportPdf", "Export PDF…", None, "{path?, …file.exportPdf options} — asks for a path when none is given"),
+    ("app.references", "Insert References…", None, "{} — DOIs, PubMed IDs or typed references → a formatted reference list"),
+    ("app.labelCheck", "Label Checklist…", None, "{} — checks the document's text against what a medicine label is expected to carry"),
+    (
+        "app.exportPrintPdf",
+        "Export Print-Ready PDF…",
+        None,
+        "{path?} — one click: bleed, crop and bleed marks, PDF/X-4, full-quality images; asks for a path when none is given",
+    ),
     ("app.palette", "Quick Apply…", Some("Cmd+Return"), "{} — search styles and commands"),
     ("app.preferences", "Preferences…", Some("Cmd+K"), "{}"),
     ("window.uiScale", "UI Scaling", None, "{scale: 0.5–3 (1 = 100%)} — the size of the whole interface"),
@@ -186,11 +194,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         "{open?: true, tab?: \"about\"|\"contributors\"|\"models\"} — the About window: splash with community links, contributor and model credits (open: false closes it)",
     ),
     ("window.toolsDoubleColumn", "Tools: Double Column", None, "{}"),
+    ("window.toolLabels", "Tools: Show Names", None, "{} — each tool's name beside its icon"),
     (
         "window.workspace",
         "Workspace",
         None,
-        "{name: Essentials|Advanced|Book|Digital Publishing|Interactive for PDF|Printing and Proofing|Typography}",
+        "{name: Simple|Essentials|Advanced|Book|Digital Publishing|Interactive for PDF|Printing and Proofing|Typography}",
     ),
     ("window.newWorkspace", "New Workspace…", None, "{name} — saves the current bars and panel arrangement"),
     ("window.deleteWorkspace", "Delete Workspace…", None, "{name}"),
@@ -216,6 +225,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "ui:app.placeWithOptions",
             "-",
             "ui:app.exportPdf",
+            "ui:app.exportPrintPdf",
             "ui:app.packageDialog",
             "ui:app.printBooklet",
             "ui:app.exportPng",
@@ -336,6 +346,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "<",
             "ui:window.panel|Glyphs|{\"panel\": \"glyphs\"}",
             "cmd:type.fillWithPlaceholder",
+            "ui:app.references",
             ">Insert Special Character",
             ">Symbols",
             "cmd:text.insert|Bullet Character|{\"text\": \"\u{2022}\", \"raw\": true}",
@@ -696,6 +707,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "ui:window.controlBar",
             "ui:window.taskBar",
             "ui:window.toolsDoubleColumn",
+            "ui:window.toolLabels",
             "-",
             "ui:window.panel",
             "-",
@@ -724,6 +736,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             ">Output",
             "ui:window.panel|Attributes|{\"panel\": \"attributes\"}",
             "cmd:preflight.run",
+            "ui:app.labelCheck",
             "<",
             "-",
             "ui:window.brightness",
@@ -1024,6 +1037,21 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
         "app.tablePanel" => {
             app.ui.open_panel = if app.ui.open_panel.as_deref() == Some("table") { None } else { Some("table".into()) };
             Ok(Value::Null)
+        }
+        "app.references" => {
+            app.ui.dialog = Some(crate::dialogs::Dialog::new("references", json!({})));
+            Ok(Value::Null)
+        }
+        "app.labelCheck" => app.run("preflight.labelCheck", json!({})).map(|r| {
+            app.ui.dialog = Some(crate::dialogs::Dialog::new("labelCheck", r));
+            Value::Null
+        }),
+        "app.exportPrintPdf" => {
+            let mut params = PRINT_PDF_PRESET.clone();
+            if let (Some(o), Some(path)) = (params.as_object_mut(), p.get("path")) {
+                o.insert("path".into(), path.clone());
+            }
+            export_pdf(app, &params)
         }
         "app.exportPdf" => {
             if p.is_null() || p.as_object().is_none_or(|m| m.is_empty()) {
@@ -1419,6 +1447,7 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             Ok(json!({"url": url}))
         }
         "window.toolsDoubleColumn" => flag(&mut app.ui.tools_double_column),
+        "window.toolLabels" => flag(&mut app.ui.tool_labels),
         "window.newWorkspace" => {
             let Some(name) = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) else {
                 app.ui.dialog = Some(crate::dialogs::Dialog::new("newWorkspace", json!({"name": ""})));
@@ -1485,8 +1514,14 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             app.ui.docking = None;
             app.ui.docking_hidden.clear();
             app.ui.control_bar = matches!(name, "Advanced" | "Typography" | "Printing and Proofing" | "Book");
+            // Simple: fewer tools, each with its name, and the Properties panel open beside the page.
+            app.ui.tool_labels = name == "Simple";
+            if name == "Simple" {
+                app.ui.tools_double_column = false;
+                app.ui.task_bar = true;
+            }
             let dock_tab = match name {
-                "Typography" => Some("properties"),
+                "Typography" | "Simple" => Some("properties"),
                 "Interactive for PDF" | "Digital Publishing" => Some("pages"),
                 _ => None,
             };
@@ -1603,6 +1638,17 @@ fn export_bytes(app: &mut DesignApp, p: &Value, ext: &str, cmd: &str) -> Result<
         None => Err("no writer".into()),
     }
 }
+
+/// File › Export Print-Ready PDF: what a print shop needs, with no dialog to fill in.
+static PRINT_PDF_PRESET: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
+        "bleed": true,
+        "marks": {"crop": true, "bleed": true, "pageInfo": true},
+        "standard": "x4",
+        "compressImages": false,
+        "tagged": false,
+    })
+});
 
 /// File › Export PDF…: ask for a path, export through `file.exportPdf` and write the bytes with the
 /// platform writer (a download on the web).
@@ -1839,6 +1885,7 @@ pub fn checked(app: &DesignApp, id: &str, params: &Value) -> Option<bool> {
         "window.taskBar" => app.ui.task_bar,
         "window.taskBarPin" => app.ui.task_bar_pin.is_some(),
         "window.toolsDoubleColumn" => app.ui.tools_double_column,
+        "window.toolLabels" => app.ui.tool_labels,
         "view.togglePreview" => app.ui.screen_mode == crate::ScreenMode::Preview,
         "window.brightness" => params.get("brightness").and_then(Value::as_str) == Some(app.ui.brightness.id()),
         "type.storyDirection" => {

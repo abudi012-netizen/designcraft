@@ -290,7 +290,10 @@ pub fn font_menu_body(app: &mut DesignApp, ui: &mut egui::Ui, menu: &[designcraf
         search.request_focus();
     }
     let q = st.query.to_lowercase();
-    let shown: Vec<&designcraft_fonts::FamilyInfo> = menu.iter().filter(|f| f.matches(&q) && (!st.only_favs || favs.contains(&f.family))).collect();
+    let mut shown: Vec<&designcraft_fonts::FamilyInfo> =
+        menu.iter().filter(|f| f.matches(&q) && (!st.only_favs || favs.contains(&f.family))).collect();
+    // Favourites float to the top of the full list, so the fonts you use are one click away.
+    let pinned = if q.is_empty() && !st.only_favs { pin_favorites(&mut shown, &favs) } else { 0 };
     if search.changed() {
         st.highlight = if q.is_empty() { None } else { Some(0) };
     }
@@ -315,8 +318,9 @@ pub fn font_menu_body(app: &mut DesignApp, ui: &mut egui::Ui, menu: &[designcraf
     egui::ScrollArea::vertical().max_height(380.0).auto_shrink([false, true]).show(ui, |ui| {
         let mut group = None;
         for (k, info) in shown.iter().enumerate() {
-            // A separator between the Western fonts and each CJK language's.
-            if group.is_some_and(|g| g != info.group) {
+            // A separator after the pinned favourites, and between the Western fonts and each CJK
+            // language's.
+            if (pinned > 0 && k == pinned) || (k > pinned && group.is_some_and(|g| g != info.group)) {
                 ui.separator();
             }
             group = Some(info.group);
@@ -384,6 +388,15 @@ pub fn font_menu_body(app: &mut DesignApp, ui: &mut egui::Ui, menu: &[designcraf
         ui.close();
     }
     pick
+}
+
+/// Moves the favourite families in `shown` to its front (in menu order) and returns how many moved.
+pub fn pin_favorites(shown: &mut Vec<&designcraft_fonts::FamilyInfo>, favs: &[String]) -> usize {
+    let (mut front, rest): (Vec<_>, Vec<_>) = shown.drain(..).partition(|f| favs.contains(&f.family));
+    let n = front.len();
+    front.extend(rest);
+    *shown = front;
+    n
 }
 
 /// A font family combo box showing `current` by its menu name, with [`font_menu_body`] as its menu.

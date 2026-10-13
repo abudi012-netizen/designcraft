@@ -40,6 +40,8 @@ pub use control::{ControlRequest, ControlResponse};
 pub type ReadFn = Box<dyn Fn(&str) -> Result<Vec<u8>, String>>;
 pub type WriteFn = Box<dyn FnMut(&str, &[u8]) -> Result<(), String>>;
 pub type PickFn = Box<dyn FnMut(&str) -> Option<String>>;
+/// GET a URL and return its body as text (reference lookups). Unset (web, tests): no lookups.
+pub type FetchFn = Box<dyn FnMut(&str) -> Result<String, String>>;
 /// Context captured before any host file-picker or read await.
 #[derive(Clone, Debug)]
 pub struct ImportRequest {
@@ -73,6 +75,8 @@ pub struct Services {
     pub download: Option<DownloadFn>,
     /// Files delivered asynchronously, drained every frame with their captured request context.
     pub inbox: Option<Inbox>,
+    /// Network GET for DOI/PubMed lookups (Insert References); desktop only.
+    pub fetch: Option<FetchFn>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +222,8 @@ pub struct UiState {
     pub shortcuts: std::collections::BTreeMap<String, String>,
     pub control_bar: bool,
     pub tools_double_column: bool,
+    /// Show each tool's name beside its icon in the Tools panel (on in the Simple workspace).
+    pub tool_labels: bool,
     /// Expanded right-dock panel group tab.
     pub dock_tab: String,
     /// Panel opened from the collapsed icon column (flyout).
@@ -332,6 +338,7 @@ impl Default for UiState {
             shortcuts: Default::default(),
             control_bar: false,
             tools_double_column: false,
+            tool_labels: false,
             dock_tab: "properties".into(),
             open_panel: None,
             floating: Vec::new(),

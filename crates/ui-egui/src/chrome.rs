@@ -64,6 +64,7 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                             |ui| {
                                 let customs: Vec<String> = app.ui.custom_workspaces.iter().map(|w| w.name.clone()).collect();
                                 for w in [
+                                    "Simple",
                                     "Essentials",
                                     "Advanced",
                                     "Book",
@@ -649,6 +650,51 @@ pub fn status_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
     ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, t.border));
 }
 
+/// Start screen: one card per ready-made template (`file.templates`), each opening a laid-out document.
+fn template_cards(app: &mut DesignApp, ui: &mut egui::Ui, t: &Tokens) {
+    let list = app.session.execute("file.templates", &json!({})).unwrap_or_default();
+    let Some(items) = list.as_array().filter(|a| !a.is_empty()) else { return };
+    ui.label(crate::rtl::widget(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Templates")).font(semibold(15.0)).color(t.text_strong)));
+    ui.add_space(8.0);
+    let mut open = None;
+    ui.horizontal_wrapped(|ui| {
+        for it in items {
+            let (Some(id), Some(name)) = (it["id"].as_str(), it["name"].as_str()) else { continue };
+            let (w, h) = (it["width"].as_f64().unwrap_or(1.0).max(1.0), it["height"].as_f64().unwrap_or(1.0).max(1.0));
+            let (cr, resp) = ui.allocate_exact_size(vec2(170.0, 150.0), Sense::click());
+            let resp = resp.on_hover_text(it["description"].as_str().unwrap_or_default()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            ui.painter().rect_filled(cr, 6.0, if resp.hovered() { t.hover } else { t.panel });
+            // A miniature page with a brand-coloured band, so the card reads as "designed".
+            let k = (80.0 / w.max(h)) as f32;
+            let pr = egui::Rect::from_center_size(cr.center() - vec2(0.0, 14.0), vec2(w as f32 * k, h as f32 * k).max(vec2(12.0, 12.0)));
+            ui.painter().rect_filled(pr, 0.0, Color32::from_gray(245));
+            let band = egui::Rect::from_min_size(pr.min, vec2(pr.width(), (pr.height() * 0.22).max(4.0)));
+            ui.painter().rect_filled(band, 0.0, Color32::from_rgb(0x1b, 0x2a, 0x4a));
+            ui.painter().text(
+                egui::pos2(cr.center().x, cr.max.y - 26.0),
+                egui::Align2::CENTER_CENTER,
+                crate::i18n::tr(&app.ui.language, name),
+                semibold(12.0),
+                t.text_strong,
+            );
+            ui.painter().text(
+                egui::pos2(cr.center().x, cr.max.y - 11.0),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0} × {:.0} mm", w / designcraft_geom::units::PT_PER_MM, h / designcraft_geom::units::PT_PER_MM),
+                egui::FontId::proportional(10.0),
+                t.text_dim,
+            );
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+            if resp.clicked() {
+                open = Some(id.to_string());
+            }
+        }
+    });
+    if let Some(id) = open {
+        let _ = app.run("file.newFromTemplate", json!({"template": id}));
+    }
+}
+
 pub fn start_screen(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let r = ui.available_rect_before_wrap();
@@ -712,6 +758,8 @@ pub fn start_screen(app: &mut DesignApp, ui: &mut egui::Ui) {
             });
             ui.add_space(20.0);
             community_card(app, ui);
+            ui.add_space(24.0);
+            template_cards(app, ui, &t);
             ui.add_space(24.0);
             ui.label(crate::rtl::widget(
                 ui,

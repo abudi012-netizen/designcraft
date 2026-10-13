@@ -1150,6 +1150,8 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         "layerOptions" => crate::i18n::tr(&app.ui.language, "Object Layer Options"),
         "keyboardShortcuts" => crate::i18n::tr(&app.ui.language, "Keyboard Shortcuts"),
         "colorPicker" => crate::i18n::tr(&app.ui.language, "Color Picker"),
+        "labelCheck" => crate::i18n::tr(&app.ui.language, "Label Checklist"),
+        "references" => crate::i18n::tr(&app.ui.language, "Insert References"),
         id => match id.strip_prefix("cmd:").and_then(designcraft_engine::find_command) {
             Some(c) => crate::i18n::tr(&app.ui.language, c.label.trim_end_matches('…')),
             None => crate::i18n::tr(&app.ui.language, "Dialog"),
@@ -1396,6 +1398,8 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
             "insertXref" => insert_xref(app, ui, &mut d),
             "findFont" => find_font(app, ui, &mut d),
             "colorPicker" => color_picker(ui, &mut d),
+            "labelCheck" => label_check(app, ui, &mut d),
+            "references" => references_dialog(app, ui, &mut d),
             "preferences" => preferences(app, ui, &mut d, body_height),
             "print" => print_dialog(app, ui, &mut d),
             "pdfImport" => {
@@ -1903,6 +1907,24 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                 d.fields.insert("status".into(), json!(e));
                 d.fields.insert("section".into(), json!("general"));
                 app.ui.dialog = Some(d);
+            }
+            r
+        }
+        "labelCheck" => Ok(Value::Null),
+        "references" => {
+            let (refs, failed) = resolve_references(app, &d.s("input"));
+            let r = app.run("text.references", json!({"references": refs, "style": d.s("style"), "title": d.s("title")}));
+            match (&r, failed.is_empty()) {
+                (Ok(_), true) => {}
+                (Ok(_), false) => {
+                    let msg = crate::i18n::tr(&app.ui.language, "Not found, inserted as typed: {list}").replace("{list}", &failed.join(", "));
+                    app.ui.dialog = Some(Dialog::new("alert", json!({"message": msg})));
+                }
+                (Err(e), _) => {
+                    let mut d = d.clone();
+                    d.fields.insert("status".into(), json!(e));
+                    app.ui.dialog = Some(d);
+                }
             }
             r
         }
@@ -3780,13 +3802,215 @@ fn insert_xref(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     }
 }
 
-/// Color Picker: saturation/brightness field and hue slider, with RGB, CMYK and hex fields.
+/// A DOI in `line` ("10.1016/…", "doi:10…", "https://doi.org/10…"), if it is one.
+pub(crate) fn doi_of(line: &str) -> Option<String> {
+    let l = line.trim().trim_end_matches(['.', ',', ';']);
+    let at = l.find("10.")?;
+    let doi = &l[at..];
+    let (prefix, suffix) = doi.split_once('/')?;
+    let ok = prefix.len() > 3 && prefix[3..].chars().all(|c| c.is_ascii_digit()) && !suffix.is_empty() && !doi.contains(char::is_whitespace);
+    // Only when the line is just the DOI (with an optional doi:/URL prefix).
+    let lead = l[..at].trim().to_lowercase();
+    let lead_ok = lead.is_empty() || lead == "doi:" || lead == "doi" || lead.ends_with("doi.org/");
+    (ok && lead_ok).then(|| doi.to_string())
+}
+
+/// A PubMed id in `line` ("12345678", "PMID: 12345678"), if it is one.
+pub(crate) fn pmid_of(line: &str) -> Option<String> {
+    let l = line.trim();
+    let l = l.strip_prefix("PMID:").or_else(|| l.strip_prefix("pmid:")).or_else(|| l.strip_prefix("PMID")).unwrap_or(l).trim();
+    (!l.is_empty() && l.len() <= 10 && l.chars().all(|c| c.is_ascii_digit())).then(|| l.to_string())
+}
+
+/// Each line of `input` as a reference: DOIs looked up on Crossref, PMIDs on PubMed (through
+/// [`crate::Services::fetch`]); anything else, or a lookup that fails, is kept as typed. Returns
+/// the references and the ids that could not be looked up.
+pub(crate) fn resolve_references(app: &mut DesignApp, input: &str) -> (Vec<Value>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut failed = Vec::new();
+    for line in input.lines().map(str::trim).filter(|l| !l.is_empty()).take(200) {
+        let looked = if let Some(doi) = doi_of(line) {
+            fetch_json(app, &format!("https://api.crossref.org/works/{doi}")).and_then(|v| v.get("message").cloned())
+        } else if let Some(id) = pmid_of(line) {
+            fetch_json(app, &format!("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&retmode=json&id={id}"))
+                .and_then(|v| v.pointer(&format!("/result/{id}")).cloned())
+                .filter(|v| v.get("error").is_none())
+        } else {
+            out.push(json!(line));
+            continue;
+        };
+        match looked {
+            Some(v) => out.push(v),
+            None => {
+                failed.push(line.to_string());
+                out.push(json!(line));
+            }
+        }
+    }
+    (out, failed)
+}
+
+fn fetch_json(app: &mut DesignApp, url: &str) -> Option<Value> {
+    let f = app.services.fetch.as_mut()?;
+    let body = f(url).ok()?;
+    serde_json::from_str(&body).ok()
+}
+
+/// Insert References: one DOI, PMID or typed reference per line, and the citation style.
+fn references_dialog(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "One per line: a DOI, a PubMed ID, or a reference typed out."));
+    ui.add_space(4.0);
+    let mut input = d.s("input");
+    if ui
+        .add(
+            egui::TextEdit::multiline(&mut input)
+                .desired_rows(8)
+                .desired_width(f32::INFINITY)
+                .hint_text("10.1016/j.ijpharm.2014.10.036\nPMID: 25445533"),
+        )
+        .changed()
+    {
+        d.fields.insert("input".into(), json!(input));
+    }
+    ui.add_space(6.0);
+    if d.s("style").is_empty() {
+        d.fields.insert("style".into(), json!("vancouver"));
+    }
+    if !d.fields.contains_key("title") {
+        d.fields.insert("title".into(), json!("References"));
+    }
+    ui.horizontal(|ui| {
+        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Style:"));
+        combo(ui, d, "style", &[("vancouver", "Vancouver (numbered)"), ("apa", "APA 7 (alphabetical)")]);
+        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Heading:"));
+        let mut title = d.s("title");
+        if ui.add(egui::TextEdit::singleline(&mut title).desired_width(120.0)).changed() {
+            d.fields.insert("title".into(), json!(title));
+        }
+    });
+    if app.services.fetch.is_none() {
+        ui.label(
+            egui::RichText::new(crate::i18n::tr(&app.ui.language, "Online lookup is not available here: lines are inserted as typed."))
+                .color(t.text_dim),
+        );
+    }
+    if let Some(m) = d.fields.get("status").and_then(Value::as_str) {
+        ui.label(egui::RichText::new(m).color(egui::Color32::from_rgb(0xe5, 0x4b, 0x4b)));
+    }
+}
+
+/// Label Checklist: each item a medicine label is expected to carry, ticked or flagged, then the
+/// fields left blank. "Check Again" re-reads the document after edits.
+fn label_check(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let (ok, bad) = (egui::Color32::from_rgb(0x3d, 0xa5, 0x5d), egui::Color32::from_rgb(0xe5, 0x4b, 0x4b));
+    let items = d.fields.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+    let missing = items.iter().filter(|i| i["found"] != true).count();
+    let summary = if missing == 0 {
+        crate::i18n::tr(&app.ui.language, "Everything on the checklist was found.").to_string()
+    } else {
+        crate::i18n::tr(&app.ui.language, "{missing} of {count} items not found on the page.")
+            .replace("{missing}", &missing.to_string())
+            .replace("{count}", &items.len().to_string())
+    };
+    crate::rtl::label(ui, egui::RichText::new(summary).font(semibold(13.0)));
+    ui.add_space(6.0);
+    egui::Grid::new("label_check").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
+        for it in &items {
+            let found = it["found"] == true;
+            ui.label(egui::RichText::new(if found { "\u{2714}" } else { "\u{2716}" }).color(if found { ok } else { bad }));
+            crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, it["label"].as_str().unwrap_or_default()));
+            ui.label(egui::RichText::new(if found { "" } else { it["hint"].as_str().unwrap_or_default() }).color(t.text_dim));
+            ui.end_row();
+        }
+    });
+    let blanks: Vec<String> = d
+        .fields
+        .get("blanks")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+    if !blanks.is_empty() {
+        ui.add_space(8.0);
+        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Fields still to fill in")).font(semibold(12.0)));
+        for b in blanks.iter().take(12) {
+            ui.label(egui::RichText::new(format!("\u{2022} {b}")).color(bad));
+        }
+    }
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new(crate::i18n::tr(&app.ui.language, "A study aid, not a regulatory review: check your local labelling rules."))
+            .size(11.0)
+            .color(t.text_dim),
+    );
+    if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Check Again"))).clicked()
+        && let Ok(Value::Object(m)) = app.session.execute("preflight.labelCheck", &json!({}))
+    {
+        d.fields.extend(m);
+    }
+}
+
+/// Ready-made colours shown above the colour field: neutrals, then a hue row and a light-tint row.
+pub(crate) const QUICK_SWATCHES: [[u8; 3]; 24] = [
+    [0x00, 0x00, 0x00],
+    [0x40, 0x40, 0x40],
+    [0x80, 0x80, 0x80],
+    [0xbf, 0xbf, 0xbf],
+    [0xe6, 0xe6, 0xe6],
+    [0xff, 0xff, 0xff],
+    [0x1b, 0x2a, 0x4a],
+    [0x1f, 0x5f, 0xbf],
+    [0x2a, 0x9d, 0xd8],
+    [0x1f, 0x8a, 0x70],
+    [0x4c, 0xaf, 0x50],
+    [0xf2, 0xc2, 0x2e],
+    [0xf2, 0x8c, 0x28],
+    [0xd6, 0x3a, 0x2f],
+    [0xc2, 0x18, 0x5b],
+    [0x7b, 0x3f, 0xa0],
+    [0x6d, 0x4c, 0x41],
+    [0x00, 0x5f, 0x5f],
+    [0xd6, 0xe4, 0xf7],
+    [0xd4, 0xef, 0xf9],
+    [0xd5, 0xf0, 0xe0],
+    [0xfd, 0xf1, 0xc8],
+    [0xfd, 0xdf, 0xc8],
+    [0xf7, 0xd4, 0xd1],
+];
+
+/// Draws the quick-swatch grid (12 per row) and returns the colour clicked this frame, if any.
+fn quick_swatches(ui: &mut egui::Ui) -> Option<egui::Color32> {
+    let mut picked = None;
+    egui::Grid::new("cp_quick").spacing([4.0, 4.0]).show(ui, |ui| {
+        for (i, [r, g, b]) in QUICK_SWATCHES.iter().enumerate() {
+            let col = egui::Color32::from_rgb(*r, *g, *b);
+            let resp = crate::widgets::swatch_chip(ui, 22.0, Some(col), None)
+                .on_hover_text(format!("#{r:02x}{g:02x}{b:02x}"))
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                picked = Some(col);
+            }
+            if (i + 1) % 12 == 0 {
+                ui.end_row();
+            }
+        }
+    });
+    picked
+}
+
+/// Color Picker: quick swatches, then saturation/brightness field and hue slider, with RGB, CMYK and hex fields.
 fn color_picker(ui: &mut egui::Ui, d: &mut Dialog) {
     let hex = d.s("hex");
     let mut c = designcraft_color::Color::from_hex(&hex).map(|c| c.to_rgb()).map_or(egui::Color32::BLACK, |[r, g, b]| {
         egui::Color32::from_rgb((r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8)
     });
     let before = c;
+    // Quick swatches: one click picks a colour, no slider dragging needed.
+    if let Some(picked) = quick_swatches(ui) {
+        c = picked;
+    }
+    ui.add_space(6.0);
     ui.horizontal_top(|ui| {
         egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque);
         ui.vertical(|ui| {

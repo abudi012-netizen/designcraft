@@ -37,6 +37,7 @@ mod package;
 mod path_type;
 mod paths;
 mod pdflayers;
+mod pharma;
 mod place_text;
 pub mod preflight;
 mod prefs;
@@ -186,6 +187,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(text::specs());
         v.extend(style::specs());
         v.extend(table::specs());
+        v.extend(pharma::specs());
         v.extend(layout::specs());
         v.extend(overrides::specs());
         v.extend(prefs::specs());
